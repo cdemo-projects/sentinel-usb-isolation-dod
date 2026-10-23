@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspaceName": { "value": "REPLACE-WITH-EXISTING-SENTINEL-WORKSPACE" },
+    "logicAppName": { "value": "isolate-usb-03eb-dod" },
+    "enableDetectionAndAutomation": { "value": false },
+    "notificationSenderEmail": { "value": "" },
+    "notificationRecipientEmail": { "value": "" }
+  }
+}

@@ -1,0 +1,14 @@
+DeviceEvents
+| where ActionType == "PnpDeviceConnected"
+| where coalesce(ingestion_time(), TimeGenerated) > ago(5m)
+| extend UsbFields = parse_json(AdditionalFields)
+| extend USBDeviceId = tostring(UsbFields.DeviceId),
+         USBDescription = tostring(UsbFields.DeviceDescription),
+         USBClassId = tostring(UsbFields.ClassId),
+         USBClassName = tostring(UsbFields.ClassName)
+| where USBDeviceId startswith @"USB\VID_03EB"
+| where isnotempty(DeviceId)
+| summarize arg_max(TimeGenerated, *) by DeviceId
+| extend MDEDeviceId = DeviceId, DetectionSignature = "USB-VID-03EB-v1"
+| project TimeGenerated, DeviceName, MDEDeviceId, USBDeviceId,
+          USBDescription, USBClassId, USBClassName, DetectionSignature
