@@ -91,121 +91,45 @@ Under **Alert enrichment > Custom details**, add these exact keys:
 
 Do not add a custom alert-title override. Save the rule. If the wizard creates it enabled, disable it immediately before connecting automation. Do not enable incident grouping later: this workflow intentionally processes only one matching alert/device per incident.
 
-**Copy two Resource IDs (and your exact Rule Name) for Phase 2:**
-1. **Workspace Resource ID** (`workspaceResourceId`):
-   - Go to **Log Analytics workspaces** -> select your Sentinel workspace -> click **Settings > Properties** on the left menu.
-   - Copy **Resource ID** (the full path starting with `/subscriptions/...`, **NOT** the 36-character Workspace ID GUID):
-     `/subscriptions/<SUBSCRIPTION-ID>/resourceGroups/<RESOURCE-GROUP>/providers/Microsoft.OperationalInsights/workspaces/<WORKSPACE-NAME>`
-2. **Analytics Rule Resource ID** (`ruleResourceId`) & **Rule Name** (`alertTitle`):
-   - In **Microsoft Sentinel > Analytics**, open your rule in **Edit** mode. On the **General** tab, copy the 36-character **ID** field (e.g., `05e12e72-b5b5-4350-afd8-fa3a3f54864c`).
-   - Take your full **Workspace Resource ID** from step 1 and append `/providers/Microsoft.SecurityInsights/alertRules/<RULE-ID>` to the end of it:
-     `/subscriptions/<SUBSCRIPTION-ID>/resourceGroups/<RESOURCE-GROUP>/providers/Microsoft.OperationalInsights/workspaces/<WORKSPACE-NAME>/providers/Microsoft.SecurityInsights/alertRules/<RULE-ID>`
-   - Also note the exact **Name** on the **General** tab—if you named the rule something different from `USB VID_03EB connected - automatic full isolation`, you **must** put that exact rule name into `alertTitle` in Phase 2!
+> **Zero-Lookup Setup:** You do **not** need to look up or copy your Workspace Resource ID, Analytics Rule ID, or Rule Name! The playbook automatically validates the Sentinel incident path and verifies the alert's `DetectionSignature = "USB-VID-03EB-v1"` and 40-character `MDEDeviceId` from Custom Details.
 
 ---
 
-### Phase 2. Create the Logic App, Enable Managed Identity & Paste Workflow JSON
+### Phase 2. Create the Logic App, Enable Managed Identity & Paste `Code view` (3 Easy Steps)
 
 1. **Create the Logic App & System-Assigned Identity**:
    - Create a **Logic App (Consumption)** named `isolate-usb-03eb-dod` in the same resource group as your Sentinel workspace.
    - Open **Identity > System assigned > On > Save** and copy the **Object (principal) ID** for Phase 3.
-2. **Initialize the Managed Identity Sentinel Connection in Designer**:
+2. **Add the Sentinel Trigger in Designer & Save**:
    - Open **Logic app designer** and add the **Microsoft Sentinel incident** trigger.
-   - *Note on Auto-Connected Playbooks*: If another playbook already exists in your Resource Group, the Designer will automatically attach to that existing Microsoft Sentinel API connection. **You do NOT need to create a separate connection** as long as that connection uses `ManagedServiceIdentity` (our playbook only uses that connection for the webhook trigger; all MDE and Sentinel actions use native HTTP calls with this Logic App's own Managed Identity). If no connection exists yet, select **Authentication type: Logic Apps Managed Identity** and click **Create**.
-   - Click **Save** on the Designer toolbar. (Saving in the Designer generates the required `"parameters": { "$connections": { ... } }` block at the bottom of **Code view**).
-3. **Prepare `portal-workflow-definition.json` in a Text Editor**:
-   - Open [portal-workflow-definition.json](./portal-workflow-definition.json) in a text editor and update the parameters at the top of the file (lines 9–28):
-     - `workspaceResourceId`: Paste your full `/subscriptions/.../workspaces/<WORKSPACE-NAME>` Resource ID from Phase 1.
-     - `ruleResourceId`: Paste your full `/subscriptions/.../workspaces/<WORKSPACE-NAME>/providers/Microsoft.SecurityInsights/alertRules/<RULE-ID>` Resource ID from Phase 1.
-     - `alertTitle`: Must match the **exact Name** of your Sentinel Analytics Rule from Phase 1!
-     - **Optional Email Alerts**:
-       - **Method A (Managed Identity Graph `sendMail` — No User Sign-in)**: Set `notificationSenderEmail`'s `defaultValue` to your sender mailbox UPN (e.g., `"soc-alerts@agency.mil"`) and `notificationRecipientEmail`'s `defaultValue` to your recipient address (e.g., `"soc@agency.mil"`). The playbook will automatically email on both Full Isolation Success (`Send_success_email_if_configured`) and Playbook Failure (`Send_failure_email_if_configured`).
-       - **Method B (Office 365 Outlook Connector in Designer — No Graph `Mail.Send` Needed)**: Leave `notificationSenderEmail` and `notificationRecipientEmail` blank (`""`), save Code view, switch to **Logic app designer**, and add **Office 365 Outlook -> Send an email (V2)** right under `Record_success` (and/or `Record_failure`).
-     - *(Note: If deploying in Commercial/GCC instead of DoD/GCC High, replace `https://management.usgovcloudapi.net` with `https://management.azure.com`, `https://management.core.usgovcloudapi.net/` with `https://management.core.windows.net/`, and `https://api-gov.securitycenter.microsoft.us` with `https://api.securitycenter.microsoft.com` or `https://api-gcc.securitycenter.microsoft.us`).*
-4. **How to Paste into Logic App `Code view` Without Errors**:
+   - *Note on Auto-Connected Playbooks*: If another playbook already exists in your Resource Group, the Designer will automatically attach to that existing Microsoft Sentinel API connection. **You do NOT need to create a separate connection** as long as that connection uses `ManagedServiceIdentity`. If no connection exists yet, select **Authentication type: Logic Apps Managed Identity** and click **Create**.
+   - Click **Save** on the Designer toolbar.
+3. **Paste [portal-code-view.json](./portal-code-view.json) into `Code view` (3-Step Copy/Paste)**:
    - Open **Development Tools > Code view** in your Logic App.
-   - **CRITICAL — Do NOT `Ctrl+A` and overwrite the whole Code view file, and do NOT paste `$connections` inside `"triggers"`!**
-   - The Azure Portal **Code view** editor requires two top-level keys: `"definition": { ... }` at the top, and `"parameters": { "$connections": { ... } }` at the very bottom.
-     - If you delete `"definition": {` at the top, Azure throws: `Could not find member 'defaultValue' on object of type 'FlowTemplateParameter'. Path 'properties.parameters.$connections.defaultValue'`.
-     - Leave `triggers.Sentinel_incident.inputs.host` untouched, and keep the Portal-generated `"parameters": { "$connections": { ... } }` block at the **very bottom** of the file.
-   - Replace **only the object inside `"definition": { ... }`** with your edited [portal-workflow-definition.json](./portal-workflow-definition.json), so the top and bottom of **Code view** look like this:
-
-```json
-{
-  "definition": {
-    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
-    "contentVersion": "1.0.0.0",
-    "parameters": {
-      "$connections": {
-        "type": "Object",
-        "defaultValue": {}
-      },
-      "workspaceResourceId": {
-        "type": "String",
-        "defaultValue": "/subscriptions/<SUB-ID>/resourceGroups/<RG-NAME>/providers/Microsoft.OperationalInsights/workspaces/<WORKSPACE-NAME>"
-      },
-      "ruleResourceId": {
-        "type": "String",
-        "defaultValue": "/subscriptions/<SUB-ID>/resourceGroups/<RG-NAME>/providers/Microsoft.OperationalInsights/workspaces/<WORKSPACE-NAME>/providers/Microsoft.SecurityInsights/alertRules/<RULE-ID>"
-      },
-      "alertTitle": {
-        "type": "String",
-        "defaultValue": "USB VID_03EB connected - automatic full isolation"
-      },
-      "notificationSenderEmail": {
-        "type": "String",
-        "defaultValue": ""
-      },
-      "notificationRecipientEmail": {
-        "type": "String",
-        "defaultValue": ""
-      }
-    },
-    "triggers": {
-      "Sentinel_incident": {
-        "type": "ApiConnectionWebhook",
-        "inputs": {
-          "host": {
-            "connection": {
-              "name": "@parameters('$connections')['azuresentinel']['connectionId']"
-            }
-          },
-          "body": {
-            "callback_url": "@listCallbackUrl()"
-          },
-          "path": "/incident-creation"
-        },
-        "runtimeConfiguration": {
-          "concurrency": {
-            "runs": 1
-          }
-        }
-      }
-    },
-    "actions": {
-      ... (all actions from portal-workflow-definition.json) ...
-    }
-  },
-  "parameters": {
-    "$connections": {
-      "value": {
-        "azuresentinel": {
-          "id": "/subscriptions/<SUB-ID>/providers/Microsoft.Web/locations/usgovvirginia/managedApis/azuresentinel",
-          "connectionId": "/subscriptions/<SUB-ID>/resourceGroups/<RG-NAME>/providers/Microsoft.Web/connections/<EXISTING-OR-NEW-CONNECTION-NAME>",
-          "connectionName": "<EXISTING-OR-NEW-CONNECTION-NAME>",
-          "connectionProperties": {
-            "authentication": {
-              "type": "ManagedServiceIdentity"
-            }
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-   - Click **Save**.
+   - **Step A**: Scroll to the very bottom of **Code view** (the last ~17 lines) and **copy** your `"parameters": { "$connections": { ... } }` block into Notepad so you don't lose your connection info:
+     ```json
+       "parameters": {
+         "$connections": {
+           "value": {
+             "azuresentinel": {
+               "connectionId": "/subscriptions/.../resourceGroups/.../providers/Microsoft.Web/connections/...",
+               "connectionName": "...",
+               "connectionProperties": {
+                 "authentication": {
+                   "type": "ManagedServiceIdentity"
+                 }
+               },
+               "id": "/subscriptions/.../providers/Microsoft.Web/locations/.../managedApis/azuresentinel"
+             }
+           }
+         }
+       }
+     ```
+   - **Step B**: Select everything (`Ctrl+A`) in **Code view** and replace it by pasting the entire contents of [portal-code-view.json](./portal-code-view.json).
+   - **Step C**: Scroll to the very bottom of **Code view**, replace the placeholder `"parameters": { "$connections": { ... } }` block with the block you copied in **Step A**, and click **Save**!
+   - *(Optional Email Alerts)*:
+     - **Office 365 Outlook Connector in Designer (Easiest — No Graph Permissions Needed)**: After clicking **Save** in Code view, switch to **Logic app designer**, click inside `Process_incident`, and add **Office 365 Outlook -> Send an email (V2)** right after `Record_success`.
+     - **Managed Identity Graph `sendMail` (No User Sign-in)**: At the top of **Code view**, set `notificationSenderEmail`'s `defaultValue` to your sender mailbox UPN (e.g., `"soc-alerts@agency.mil"`) and `notificationRecipientEmail`'s `defaultValue` to your recipient address (e.g., `"soc@agency.mil"`).
 
 ---
 

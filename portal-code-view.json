@@ -1,0 +1,766 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "$connections": {
+        "type": "Object",
+        "defaultValue": {}
+      },
+      "workspaceResourceId": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "ruleResourceId": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "alertTitle": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "notificationSenderEmail": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "notificationRecipientEmail": {
+        "type": "String",
+        "defaultValue": ""
+      }
+    },
+    "triggers": {
+      "Sentinel_incident": {
+        "type": "ApiConnectionWebhook",
+        "inputs": {
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+            }
+          },
+          "body": {
+            "callback_url": "@listCallbackUrl()"
+          },
+          "path": "/incident-creation"
+        },
+        "runtimeConfiguration": {
+          "concurrency": {
+            "runs": 1
+          }
+        }
+      }
+    },
+    "actions": {
+      "Validate_incident_scope": {
+        "type": "If",
+        "expression": "@and(contains(toLower(string(triggerBody()?['object']?['id'])), '/providers/microsoft.securityinsights/incidents/'), equals(length(split(string(triggerBody()?['object']?['id']), '/')), 13), or(empty(parameters('workspaceResourceId')), startsWith(toLower(string(triggerBody()?['object']?['id'])), toLower(concat(parameters('workspaceResourceId'), '/providers/Microsoft.SecurityInsights/incidents/')))))",
+        "actions": {
+          "Process_incident": {
+            "type": "Scope",
+            "actions": {
+              "Get_incident": {
+                "type": "Http",
+                "inputs": {
+                  "method": "GET",
+                  "uri": "@concat('https://management.usgovcloudapi.net', triggerBody()['object']['id'], '?api-version=2024-03-01')",
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.core.usgovcloudapi.net/"
+                  }
+                },
+                "runAfter": {}
+              },
+              "Check_rule": {
+                "type": "If",
+                "expression": "@or(empty(parameters('ruleResourceId')), contains(toLower(string(body('Get_incident')?['properties']?['relatedAnalyticRuleIds'])), toLower(parameters('ruleResourceId'))))",
+                "actions": {},
+                "else": {
+                  "actions": {
+                    "Reject_unrelated_incident": {
+                      "type": "Terminate",
+                      "inputs": {
+                        "runStatus": "Failed",
+                        "runError": {
+                          "code": "WrongAnalyticRule",
+                          "message": "Incident is not associated with this USB analytics rule. No isolation requested."
+                        }
+                      },
+                      "runAfter": {}
+                    }
+                  }
+                },
+                "runAfter": {
+                  "Get_incident": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "List_alerts": {
+                "type": "Http",
+                "inputs": {
+                  "method": "POST",
+                  "uri": "@concat('https://management.usgovcloudapi.net', triggerBody()['object']['id'], '/alerts?api-version=2024-03-01')",
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.core.usgovcloudapi.net/"
+                  },
+                  "retryPolicy": {
+                    "type": "exponential",
+                    "count": 3,
+                    "interval": "PT10S"
+                  }
+                },
+                "runAfter": {
+                  "Check_rule": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Matching_alerts": {
+                "type": "Query",
+                "inputs": {
+                  "from": "@body('List_alerts')['value']",
+                  "where": "@or(empty(parameters('alertTitle')), equals(item()?['properties']?['alertDisplayName'], parameters('alertTitle')))"
+                },
+                "runAfter": {
+                  "List_alerts": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "One_alert": {
+                "type": "ParseJson",
+                "inputs": {
+                  "content": "@body('Matching_alerts')",
+                  "schema": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 1,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "properties"
+                      ]
+                    }
+                  }
+                },
+                "runAfter": {
+                  "Matching_alerts": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Parse_custom_details": {
+                "type": "ParseJson",
+                "inputs": {
+                  "content": "@json(string(coalesce(first(body('One_alert'))['properties']['additionalData']?['Custom Details'], first(body('One_alert'))['properties']['additionalData']?['CustomDetails'], triggerBody()?['object']?['properties']?['alerts']?[0]?['properties']?['additionalData']?['Custom Details'], triggerBody()?['object']?['properties']?['alerts']?[0]?['properties']?['additionalData']?['CustomDetails'])))",
+                  "schema": {
+                    "type": "object",
+                    "required": [
+                      "MDEDeviceId",
+                      "DetectionSignature"
+                    ],
+                    "properties": {
+                      "MDEDeviceId": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 1,
+                        "items": {
+                          "type": "string",
+                          "minLength": 40,
+                          "maxLength": 40
+                        }
+                      },
+                      "DetectionSignature": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 1,
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "USB-VID-03EB-v1"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                },
+                "runAfter": {
+                  "One_alert": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Device_id": {
+                "type": "Compose",
+                "inputs": "@first(body('Parse_custom_details')['MDEDeviceId'])",
+                "runAfter": {
+                  "Parse_custom_details": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Request_comment": {
+                "type": "Compose",
+                "inputs": "@concat('USB-VID-03EB-v1; incident=', triggerBody()['object']['id'], '; device=', outputs('Device_id'))",
+                "runAfter": {
+                  "Device_id": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Get_machine": {
+                "type": "Http",
+                "inputs": {
+                  "method": "GET",
+                  "uri": "@concat('https://api-gov.securitycenter.microsoft.us/api/machines/', uriComponent(outputs('Device_id')))",
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://api-gov.securitycenter.microsoft.us"
+                  },
+                  "retryPolicy": {
+                    "type": "exponential",
+                    "count": 3,
+                    "interval": "PT10S"
+                  }
+                },
+                "runAfter": {
+                  "Request_comment": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Validate_machine": {
+                "type": "If",
+                "expression": "@and(equals(toLower(string(body('Get_machine')?['id'])), toLower(outputs('Device_id'))), equals(toLower(string(coalesce(body('Get_machine')?['onboardingStatus'], body('Get_machine')?['onboardingstatus']))), 'onboarded'))",
+                "actions": {},
+                "else": {
+                  "actions": {
+                    "Record_invalid_machine": {
+                      "type": "Http",
+                      "inputs": {
+                        "method": "PUT",
+                        "uri": "@concat('https://management.usgovcloudapi.net', triggerBody()['object']['id'], '/comments/', guid(), '?api-version=2024-03-01')",
+                        "body": {
+                          "properties": {
+                            "message": "USB isolation refused: MDE machine is not onboarded or its ID does not match. Review the Logic App run and MDE."
+                          }
+                        },
+                        "authentication": {
+                          "type": "ManagedServiceIdentity",
+                          "audience": "https://management.core.usgovcloudapi.net/"
+                        }
+                      },
+                      "runAfter": {}
+                    },
+                    "Reject_invalid_machine": {
+                      "type": "Terminate",
+                      "inputs": {
+                        "runStatus": "Failed",
+                        "runError": {
+                          "code": "InvalidMachine",
+                          "message": "MDE machine validation failed; no isolation requested."
+                        }
+                      },
+                      "runAfter": {
+                        "Record_invalid_machine": [
+                          "Succeeded",
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "runAfter": {
+                  "Get_machine": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "List_isolation_actions": {
+                "type": "Http",
+                "inputs": {
+                  "method": "GET",
+                  "uri": "@concat('https://api-gov.securitycenter.microsoft.us/api/machineactions?$filter=', uriComponent(concat('machineId eq ', decodeUriComponent('%27'), outputs('Device_id'), decodeUriComponent('%27'), ' and (type eq ', decodeUriComponent('%27'), 'Isolate', decodeUriComponent('%27'), ' or type eq ', decodeUriComponent('%27'), 'Unisolate', decodeUriComponent('%27'), ')')))",
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://api-gov.securitycenter.microsoft.us"
+                  }
+                },
+                "runAfter": {
+                  "Validate_machine": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Validate_action_list": {
+                "type": "If",
+                "expression": "@empty(body('List_isolation_actions')?['@odata.nextLink'])",
+                "actions": {},
+                "else": {
+                  "actions": {
+                    "Record_pagination": {
+                      "type": "Http",
+                      "inputs": {
+                        "method": "PUT",
+                        "uri": "@concat('https://management.usgovcloudapi.net', triggerBody()['object']['id'], '/comments/', guid(), '?api-version=2024-03-01')",
+                        "body": {
+                          "properties": {
+                            "message": "USB isolation refused: machine action history is paginated; duplicate prevention could not be established. Review manually."
+                          }
+                        },
+                        "authentication": {
+                          "type": "ManagedServiceIdentity",
+                          "audience": "https://management.core.usgovcloudapi.net/"
+                        }
+                      },
+                      "runAfter": {}
+                    },
+                    "Reject_incomplete_history": {
+                      "type": "Terminate",
+                      "inputs": {
+                        "runStatus": "Failed",
+                        "runError": {
+                          "code": "IncompleteActionHistory",
+                          "message": "Action history is paginated; no isolation requested."
+                        }
+                      },
+                      "runAfter": {
+                        "Record_pagination": [
+                          "Succeeded",
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "runAfter": {
+                  "List_isolation_actions": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Existing_requests": {
+                "type": "Query",
+                "inputs": {
+                  "from": "@body('List_isolation_actions')['value']",
+                  "where": "@or(equals(item()?['requestorComment'], outputs('Request_comment')), contains(createArray('Pending', 'InProgress'), item()?['status']))"
+                },
+                "runAfter": {
+                  "Validate_action_list": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Needs_isolation": {
+                "type": "If",
+                "expression": "@empty(body('Existing_requests'))",
+                "actions": {
+                  "Submit_full_isolation": {
+                    "type": "Http",
+                    "inputs": {
+                      "method": "POST",
+                      "uri": "@concat('https://api-gov.securitycenter.microsoft.us/api/machines/', uriComponent(outputs('Device_id')), '/isolate')",
+                      "headers": {
+                        "Content-Type": "application/json"
+                      },
+                      "body": {
+                        "Comment": "@outputs('Request_comment')",
+                        "IsolationType": "Full"
+                      },
+                      "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "https://api-gov.securitycenter.microsoft.us"
+                      },
+                      "retryPolicy": {
+                        "type": "none"
+                      }
+                    },
+                    "runAfter": {}
+                  },
+                  "Validate_submitted_action": {
+                    "type": "ParseJson",
+                    "inputs": {
+                      "content": "@body('Submit_full_isolation')",
+                      "schema": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "machineId",
+                          "type",
+                          "status"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "minLength": 36,
+                            "maxLength": 36
+                          },
+                          "machineId": {
+                            "type": "string",
+                            "minLength": 40,
+                            "maxLength": 40
+                          },
+                          "scope": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "Isolate"
+                            ]
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "Pending",
+                              "InProgress",
+                              "Succeeded",
+                              "Failed",
+                              "TimeOut",
+                              "Cancelled"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "runAfter": {
+                      "Submit_full_isolation": [
+                        "Succeeded"
+                      ]
+                    }
+                  },
+                  "Wait_for_completion": {
+                    "type": "Until",
+                    "expression": "@contains(createArray('Succeeded', 'Failed', 'TimeOut', 'Cancelled'), body('Poll_action')?['status'])",
+                    "limit": {
+                      "count": 15,
+                      "timeout": "PT6M"
+                    },
+                    "actions": {
+                      "Poll_delay": {
+                        "type": "Wait",
+                        "inputs": {
+                          "interval": {
+                            "count": 20,
+                            "unit": "Second"
+                          }
+                        },
+                        "runAfter": {}
+                      },
+                      "Poll_action": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "GET",
+                          "uri": "@concat('https://api-gov.securitycenter.microsoft.us/api/machineactions/', uriComponent(body('Validate_submitted_action')['id']))",
+                          "authentication": {
+                            "type": "ManagedServiceIdentity",
+                            "audience": "https://api-gov.securitycenter.microsoft.us"
+                          },
+                          "retryPolicy": {
+                            "type": "exponential",
+                            "count": 2,
+                            "interval": "PT10S"
+                          }
+                        },
+                        "runAfter": {
+                          "Poll_delay": [
+                            "Succeeded"
+                          ]
+                        }
+                      }
+                    },
+                    "runAfter": {
+                      "Validate_submitted_action": [
+                        "Succeeded"
+                      ]
+                    }
+                  },
+                  "Verify_completion": {
+                    "type": "If",
+                    "expression": "@and(equals(body('Poll_action')?['status'], 'Succeeded'), equals(body('Poll_action')?['scope'], 'Full'), equals(body('Poll_action')?['type'], 'Isolate'), equals(toLower(string(body('Poll_action')?['machineId'])), toLower(outputs('Device_id'))))",
+                    "actions": {
+                      "Record_success": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "PUT",
+                          "uri": "@concat('https://management.usgovcloudapi.net', triggerBody()['object']['id'], '/comments/', guid(), '?api-version=2024-03-01')",
+                          "body": {
+                            "properties": {
+                              "message": "@concat('MDE reports FULL isolation Succeeded. DeviceId=', outputs('Device_id'), '; actionId=', body('Validate_submitted_action')['id'], '. No automatic release is configured.')"
+                            }
+                          },
+                          "authentication": {
+                            "type": "ManagedServiceIdentity",
+                            "audience": "https://management.core.usgovcloudapi.net/"
+                          }
+                        },
+                        "runAfter": {}
+                      },
+                      "Send_success_email_if_configured": {
+                        "type": "If",
+                        "expression": "@and(not(empty(parameters('notificationSenderEmail'))), not(empty(parameters('notificationRecipientEmail'))))",
+                        "actions": {
+                          "Send_isolation_success_email": {
+                            "type": "Http",
+                            "inputs": {
+                              "method": "POST",
+                              "uri": "@concat('https://dod-graph.microsoft.us/v1.0/users/', uriComponent(parameters('notificationSenderEmail')), '/sendMail')",
+                              "body": {
+                                "message": {
+                                  "subject": "@concat('[MDE ISOLATED] USB VID_03EB Full Isolation Succeeded - ', string(body('Get_machine')?['computerDnsName']))",
+                                  "body": {
+                                    "contentType": "Text",
+                                    "content": "@concat('MDE FULL device isolation succeeded.\n\nDevice Name: ', string(body('Get_machine')?['computerDnsName']), '\nMDE DeviceId: ', outputs('Device_id'), '\nMDE ActionId: ', body('Validate_submitted_action')['id'], '\nSentinel Incident: ', string(triggerBody()?['object']?['id']), '\n\nNo automatic release is configured.')"
+                                  },
+                                  "toRecipients": [
+                                    {
+                                      "emailAddress": {
+                                        "address": "@parameters('notificationRecipientEmail')"
+                                      }
+                                    }
+                                  ]
+                                },
+                                "saveToSentItems": false
+                              },
+                              "authentication": {
+                                "type": "ManagedServiceIdentity",
+                                "audience": "https://dod-graph.microsoft.us"
+                              }
+                            },
+                            "runAfter": {}
+                          },
+                          "Record_email_warning": {
+                            "type": "Http",
+                            "inputs": {
+                              "method": "PUT",
+                              "uri": "@concat('https://management.usgovcloudapi.net', triggerBody()['object']['id'], '/comments/', guid(), '?api-version=2024-03-01')",
+                              "body": {
+                                "properties": {
+                                  "message": "@concat('MDE FULL isolation Succeeded, but notification email could not be sent from ', parameters('notificationSenderEmail'), ' (verify Microsoft Graph Mail.Send permission and Exchange mailbox license).')"
+                                }
+                              },
+                              "authentication": {
+                                "type": "ManagedServiceIdentity",
+                                "audience": "https://management.core.usgovcloudapi.net/"
+                              }
+                            },
+                            "runAfter": {
+                              "Send_isolation_success_email": [
+                                "Failed",
+                                "TimedOut"
+                              ]
+                            }
+                          }
+                        },
+                        "else": {
+                          "actions": {}
+                        },
+                        "runAfter": {
+                          "Record_success": [
+                            "Succeeded"
+                          ]
+                        }
+                      }
+                    },
+                    "else": {
+                      "actions": {
+                        "Record_unsuccessful_action": {
+                          "type": "Http",
+                          "inputs": {
+                            "method": "PUT",
+                            "uri": "@concat('https://management.usgovcloudapi.net', triggerBody()['object']['id'], '/comments/', guid(), '?api-version=2024-03-01')",
+                            "body": {
+                              "properties": {
+                                "message": "@concat('FULL isolation NOT confirmed. DeviceId=', outputs('Device_id'), '; actionId=', body('Validate_submitted_action')['id'], '; lastStatus=', string(body('Poll_action')?['status']), '. A pending action can still execute later. Inspect MDE; do not assume containment or blindly retry.')"
+                              }
+                            },
+                            "authentication": {
+                              "type": "ManagedServiceIdentity",
+                              "audience": "https://management.core.usgovcloudapi.net/"
+                            }
+                          },
+                          "runAfter": {}
+                        },
+                        "Fail_unconfirmed_action": {
+                          "type": "Terminate",
+                          "inputs": {
+                            "runStatus": "Failed",
+                            "runError": {
+                              "code": "IsolationNotConfirmed",
+                              "message": "MDE full isolation failed, remains pending, or returned unexpected action details."
+                            }
+                          },
+                          "runAfter": {
+                            "Record_unsuccessful_action": [
+                              "Succeeded",
+                              "Failed",
+                              "TimedOut"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "runAfter": {
+                      "Wait_for_completion": [
+                        "Succeeded",
+                        "TimedOut"
+                      ]
+                    }
+                  }
+                },
+                "else": {
+                  "actions": {
+                    "Record_existing_state": {
+                      "type": "Http",
+                      "inputs": {
+                        "method": "PUT",
+                        "uri": "@concat('https://management.usgovcloudapi.net', triggerBody()['object']['id'], '/comments/', guid(), '?api-version=2024-03-01')",
+                        "body": {
+                          "properties": {
+                            "message": "@concat('No new isolation request. DeviceId=', outputs('Device_id'), '; blockingActionCount=', string(length(body('Existing_requests'))), '. An isolation/release action is pending, or this incident already submitted a request. Existing containment/scope is NOT certified by this run. Review MDE before any retry or release.')"
+                          }
+                        },
+                        "authentication": {
+                          "type": "ManagedServiceIdentity",
+                          "audience": "https://management.core.usgovcloudapi.net/"
+                        }
+                      },
+                      "runAfter": {}
+                    }
+                  }
+                },
+                "runAfter": {
+                  "Existing_requests": [
+                    "Succeeded"
+                  ]
+                }
+              }
+            },
+            "runAfter": {}
+          },
+          "Record_failure": {
+            "type": "Http",
+            "inputs": {
+              "method": "PUT",
+              "uri": "@concat('https://management.usgovcloudapi.net', triggerBody()['object']['id'], '/comments/', guid(), '?api-version=2024-03-01')",
+              "body": {
+                "properties": {
+                  "message": "@concat('USB isolation playbook FAILED. Inspect Logic App run ', workflow()['run']['name'], ' and MDE Action center. A submitted/pending isolation may still execute. No automatic release or blind POST retry was performed.')"
+                }
+              },
+              "authentication": {
+                "type": "ManagedServiceIdentity",
+                "audience": "https://management.core.usgovcloudapi.net/"
+              }
+            },
+            "runAfter": {
+              "Process_incident": [
+                "Failed",
+                "TimedOut"
+              ]
+            }
+          },
+          "Send_failure_email_if_configured": {
+            "type": "If",
+            "expression": "@and(not(empty(parameters('notificationSenderEmail'))), not(empty(parameters('notificationRecipientEmail'))))",
+            "actions": {
+              "Send_isolation_failure_email": {
+                "type": "Http",
+                "inputs": {
+                  "method": "POST",
+                  "uri": "@concat('https://dod-graph.microsoft.us/v1.0/users/', uriComponent(parameters('notificationSenderEmail')), '/sendMail')",
+                  "body": {
+                    "message": {
+                      "subject": "@concat('[ACTION REQUIRED] USB VID_03EB Isolation Playbook FAILED - Run ', workflow()['run']['name'])",
+                      "body": {
+                        "contentType": "Text",
+                        "content": "@concat('The Sentinel USB VID_03EB isolation playbook failed or could not confirm containment.\n\nSentinel Incident: ', string(triggerBody()?['object']?['id']), '\nLogic App Run: ', workflow()['run']['name'], '\n\nInspect the Logic App run history and MDE Action Center immediately. A pending isolation action may still execute.')"
+                      },
+                      "toRecipients": [
+                        {
+                          "emailAddress": {
+                            "address": "@parameters('notificationRecipientEmail')"
+                          }
+                        }
+                      ]
+                    },
+                    "saveToSentItems": false
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://dod-graph.microsoft.us"
+                  }
+                },
+                "runAfter": {}
+              }
+            },
+            "else": {
+              "actions": {}
+            },
+            "runAfter": {
+              "Record_failure": [
+                "Succeeded",
+                "Failed",
+                "TimedOut"
+              ]
+            }
+          },
+          "Fail_run": {
+            "type": "Terminate",
+            "inputs": {
+              "runStatus": "Failed",
+              "runError": {
+                "code": "IsolationWorkflowFailed",
+                "message": "Review failed actions and MDE Action center. Incident comment may also have failed."
+              }
+            },
+            "runAfter": {
+              "Send_failure_email_if_configured": [
+                "Succeeded",
+                "Failed",
+                "TimedOut"
+              ]
+            }
+          }
+        },
+        "else": {
+          "actions": {
+            "Reject_wrong_workspace": {
+              "type": "Terminate",
+              "inputs": {
+                "runStatus": "Failed",
+                "runError": {
+                  "code": "InvalidIncidentScope",
+                  "message": "Trigger must reference an incident in the configured workspace."
+                }
+              },
+              "runAfter": {}
+            }
+          }
+        },
+        "runAfter": {}
+      }
+    }
+  },
+  "parameters": {
+    "$connections": {
+      "value": {
+        "azuresentinel": {
+          "connectionId": "/subscriptions/<SUBSCRIPTION-ID>/resourceGroups/<RESOURCE-GROUP>/providers/Microsoft.Web/connections/<CONNECTION-NAME>",
+          "connectionName": "<CONNECTION-NAME>",
+          "connectionProperties": {
+            "authentication": {
+              "type": "ManagedServiceIdentity"
+            }
+          },
+          "id": "/subscriptions/<SUBSCRIPTION-ID>/providers/Microsoft.Web/locations/<REGION>/managedApis/azuresentinel"
+        }
+      }
+    }
+  }
+}

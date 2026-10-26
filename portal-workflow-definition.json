@@ -8,15 +8,15 @@
     },
     "workspaceResourceId": {
       "type": "String",
-      "defaultValue": "PASTE-WORKSPACE-RESOURCE-ID"
+      "defaultValue": ""
     },
     "ruleResourceId": {
       "type": "String",
-      "defaultValue": "PASTE-ANALYTICS-RULE-RESOURCE-ID"
+      "defaultValue": ""
     },
     "alertTitle": {
       "type": "String",
-      "defaultValue": "USB VID_03EB connected - automatic full isolation"
+      "defaultValue": ""
     },
     "notificationSenderEmail": {
       "type": "String",
@@ -51,7 +51,7 @@
   "actions": {
     "Validate_incident_scope": {
       "type": "If",
-      "expression": "@and(startsWith(toLower(string(triggerBody()?['object']?['id'])), toLower(concat(parameters('workspaceResourceId'), '/providers/Microsoft.SecurityInsights/incidents/'))), equals(length(split(string(triggerBody()?['object']?['id']), '/')), 13))",
+      "expression": "@and(contains(toLower(string(triggerBody()?['object']?['id'])), '/providers/microsoft.securityinsights/incidents/'), equals(length(split(string(triggerBody()?['object']?['id']), '/')), 13), or(empty(parameters('workspaceResourceId')), startsWith(toLower(string(triggerBody()?['object']?['id'])), toLower(concat(parameters('workspaceResourceId'), '/providers/Microsoft.SecurityInsights/incidents/')))))",
       "actions": {
         "Process_incident": {
           "type": "Scope",
@@ -70,7 +70,7 @@
             },
             "Check_rule": {
               "type": "If",
-              "expression": "@contains(toLower(string(body('Get_incident')?['properties']?['relatedAnalyticRuleIds'])), toLower(parameters('ruleResourceId')))",
+              "expression": "@or(empty(parameters('ruleResourceId')), contains(toLower(string(body('Get_incident')?['properties']?['relatedAnalyticRuleIds'])), toLower(parameters('ruleResourceId'))))",
               "actions": {},
               "else": {
                 "actions": {
@@ -118,7 +118,7 @@
               "type": "Query",
               "inputs": {
                 "from": "@body('List_alerts')['value']",
-                "where": "@equals(item()?['properties']?['alertDisplayName'], parameters('alertTitle'))"
+                "where": "@or(empty(parameters('alertTitle')), equals(item()?['properties']?['alertDisplayName'], parameters('alertTitle')))"
               },
               "runAfter": {
                 "List_alerts": [
