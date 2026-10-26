@@ -169,7 +169,8 @@ sentinel-usb-isolation-dod/
 ├── Deploy-SentinelUsbIsolation.ps1  # End-to-end automated deployment & permissions script (Commercial/GCC/GCCHigh/DoD)
 ├── Simulate-UsbTestEvent.ps1        # Self-service simulation & end-to-end isolation test script
 ├── Grant-PlaybookAccess.ps1         # DoD/Gov-specific RBAC & MDE AppRole helper (with -WhatIf)
-├── CUSTOMER-PORTAL-SETUP.md         # Step-by-step no-ARM portal walkthrough + DoD IL5 Monday Call Runbook
+├── CUSTOMER-PORTAL-SETUP.md         # Step-by-step no-ARM portal & Cloud Shell setup guide
+├── CUSTOMER-PORTAL-SETUP.pdf        # Formatted PDF technical deployment guide
 ├── test_package.py                  # Offline unit test suite (19 contract, expression, and schema checks)
 └── Test-Package.ps1                 # Test runner validating PowerShell syntax and Python unit tests
 ```

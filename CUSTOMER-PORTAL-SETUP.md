@@ -275,27 +275,7 @@ are separate from Sentinel workspace permissions.
 
 **To stop automated containment at any time:** disable the Automation Rule and Analytics Rule, then inspect queued workflow runs and pending MDE actions. Disabling rules does not automatically release already-isolated endpoints.
 
----
-
-## Monday Customer Call Runbook (15-Minute Agenda)
-
-Use this quick sequence during Monday's live implementation session:
-
-1. **Pre-Flight Check (2 mins)**:
-   - Confirm the person sharing their screen has **active PIM elevation** for **`Privileged Role Administrator` or `Global Administrator`** (for Entra AppRoles) + **`Owner` or `RBAC Administrator`** on the Sentinel Resource Group.
-   - Confirm **Microsoft Sentinel > Data connectors > Microsoft Defender XDR** has raw **`DeviceEvents`** checked.
-   - Confirm whether the customer wants **Built-in Managed Identity Graph Email** (`notificationSenderEmail` + `notificationRecipientEmail`) or the **Office 365 Outlook connector** in Designer.
-2. **Deploy Resources (5 mins)**:
-   - **If ARM in Portal is approved**: Open **Deploy a custom template**, paste [azuredeploy.json](./azuredeploy.json), fill in `workspaceName` (and optional email parameters), and click **Create**.
-   - **If Manual Portal is preferred**: Follow **Phase 1** (paste KQL) and **Phase 2** (create Logic App + Managed Identity + Sentinel trigger connection, then paste [portal-workflow-definition.json](./portal-workflow-definition.json) into `definition` in Code view).
-   - **If CLI/Cloud Shell Script is approved**: Run [Deploy-SentinelUsbIsolation.ps1](./Deploy-SentinelUsbIsolation.ps1) with `-CloudEnvironment DoD`.
-3. **Grant Permissions in Cloud Shell (3 mins)**:
-   - Run the **Option 3A** Cloud Shell block above (with `$graphUrl = "https://dod-graph.microsoft.us"` for DoD IL5).
-   - Authorize the Sentinel API Connection in the Logic App if deployed via ARM.
-4. **Live Pilot Test & Sign-off (5 mins)**:
-   - Run [Simulate-UsbTestEvent.ps1](./Simulate-UsbTestEvent.ps1) against an approved non-critical test VM (with `-CloudEnvironment DoD -UnisolateAfterTest`) **or** plug in an approved `USB\VID_03EB` test device and run the playbook on the resulting Sentinel incident.
-   - Verify the MDE Action Center status (`Isolate - Full - Succeeded`), the Sentinel incident comment, and the email notification.
-
 For limits, duplicate handling, logging considerations and Microsoft references,
 see [the operating notes](./README.md#failure-handling-and-operating-limits).
+
 
