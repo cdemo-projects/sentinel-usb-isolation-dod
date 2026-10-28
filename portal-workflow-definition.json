@@ -51,7 +51,7 @@
   "actions": {
     "Validate_incident_scope": {
       "type": "If",
-      "expression": "@and(contains(toLower(string(triggerBody()?['object']?['id'])), '/providers/microsoft.securityinsights/incidents/'), equals(length(split(string(triggerBody()?['object']?['id']), '/')), 13), or(empty(parameters('workspaceResourceId')), startsWith(toLower(string(triggerBody()?['object']?['id'])), toLower(concat(parameters('workspaceResourceId'), '/providers/Microsoft.SecurityInsights/incidents/')))))",
+      "expression": "@and(startsWith(toLower(string(triggerBody()?['object']?['id'])), '/subscriptions/'), contains(toLower(string(triggerBody()?['object']?['id'])), '/providers/microsoft.securityinsights/incidents/'), equals(length(split(string(triggerBody()?['object']?['id']), '/')), 13), or(empty(parameters('workspaceResourceId')), startsWith(toLower(string(triggerBody()?['object']?['id'])), toLower(concat(parameters('workspaceResourceId'), '/providers/Microsoft.SecurityInsights/incidents/'))), equals(toLower(string(triggerBody()?['workspaceId'])), toLower(parameters('workspaceResourceId')))))",
       "actions": {
         "Process_incident": {
           "type": "Scope",

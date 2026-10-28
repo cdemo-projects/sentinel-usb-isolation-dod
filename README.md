@@ -399,9 +399,133 @@ production domain controller, hypervisor, critical server or remote-only endpoin
 
 ## Self-Service Simulation & Lessons Learned from Live Deployment
 
-### How to Simulate Data & Trigger Isolation on Demand (`Simulate-UsbTestEvent.ps1`)
+### How to Simulate a `USB\VID_03EB` Event & Test Isolation End-to-End (3 Methods)
 
-Because `DeviceEvents` is a built-in system table in Microsoft Sentinel / Log Analytics (cannot be written via the Custom Logs Ingestion API) and Azure VMs lack physical USB controllers, use [Simulate-UsbTestEvent.ps1](./Simulate-UsbTestEvent.ps1) whenever you want to create test data and verify the full pipeline end-to-end:
+Because `DeviceEvents` is a built-in Microsoft Defender XDR system table in Sentinel / Log Analytics (cannot be written via the Custom Logs Ingestion API) and Azure VMs do not have physical USB host controllers attached, you can use any of the **3 methods below** to simulate a `USB\VID_03EB` connection and test the full containment pipeline.
+
+---
+
+#### Method 1: Zero-CLI Portal KQL Simulation (Recommended for Customer Portal Testing)
+
+This method requires **zero CLI tools, scripts, or VM access** and works on any Azure VM or physical endpoint onboarded to MDE. It injects a synthetic `PnpDeviceConnected` row into the Analytics Rule query evaluation using a real test machine's `MDEDeviceId` so Sentinel creates a real Incident, fires the Automation Rule, runs the Logic App, and isolates the test VM in MDE.
+
+1. **Get your Test Machine's 40-character `DeviceId` and `DeviceName`**:
+   In **Microsoft Sentinel > Logs**, run:
+   ```kusto
+   DeviceInfo
+   | where TimeGenerated > ago(24h) and isnotempty(DeviceId)
+   | summarize arg_max(TimeGenerated, DeviceName, OSPlatform) by DeviceId
+   | take 10
+   ```
+2. **Temporarily Prepend `SimulatedUsbEvent` to the Analytics Rule Query**:
+   Edit your Analytics Rule (**Set rule logic**), paste these lines **above** your existing query (replacing `<40-CHAR-MDE-DEVICE-ID>` and `<TEST-VM-HOSTNAME>`), and set **Run query every** to `5 minutes`:
+   ```kusto
+   let SimulatedUsbEvent = print
+       TimeGenerated = now(),
+       DeviceId = "<40-CHAR-MDE-DEVICE-ID>",
+       DeviceName = "<TEST-VM-HOSTNAME>",
+       ActionType = "PnpDeviceConnected",
+       AdditionalFields = todynamic('{"ClassId":"{36fc9e60-c465-11cf-8056-444553540000}","ClassName":"USB","DeviceDescription":"Simulated Atmel USB Composite Device (VID_03EB Test)","DeviceId":"USB\\\\VID_03EB&PID_2404\\\\SIM03EB01"}');
+   union DeviceEvents, SimulatedUsbEvent
+   | where ActionType == "PnpDeviceConnected"
+   | extend AdditionalFields = todynamic(AdditionalFields)
+   | extend AdditionalFields_ClassId = tostring(AdditionalFields["ClassId"]),
+            AdditionalFields_ClassName = tostring(AdditionalFields["ClassName"]),
+            AdditionalFields_DeviceDescription = tostring(AdditionalFields["DeviceDescription"]),
+            AdditionalFields_DeviceId = tostring(AdditionalFields["DeviceId"])
+   | where AdditionalFields_DeviceId startswith "USB\\VID_03EB"
+   | project TimeGenerated, DeviceId, DeviceName, ActionType, AdditionalFields_ClassId, AdditionalFields_ClassName, AdditionalFields_DeviceDescription, AdditionalFields_DeviceId
+   | extend MDEDeviceId = DeviceId, USBDeviceId = tostring(AdditionalFields_DeviceId), DetectionSignature = "USB-VID-03EB-v1"
+   ```
+3. **Verify Containment & Restore the Clean Query**:
+   - Within 5 minutes, verify that the Sentinel Incident is created, the Logic App run succeeds, MDE Action Center shows `Isolate (Full) - Succeeded`, the Sentinel incident comment is posted, and the optional email alert is delivered.
+   - Remove the `let SimulatedUsbEvent ...;` block and change `union DeviceEvents, SimulatedUsbEvent` back to `DeviceEvents`, then save the Analytics Rule.
+   - Release the test machine from isolation in Microsoft Defender Portal (**Device page > `...` > Release from isolation**).
+
+---
+
+#### Method 2: Windows Guest VM PowerShell `SetupAPI` Simulation (`setupapi.dll`)
+
+If you want to register an actual phantom `USB\VID_03EB&PID_2404` Plug-and-Play device node inside a Windows test VM's Device Manager (`HKLM\SYSTEM\CurrentControlSet\Enum\USB\VID_03EB&PID_2404\SIM03EB01`), run the following PowerShell snippet **as Administrator** on the test VM:
+
+```powershell
+$code = @'
+using System;
+using System.Runtime.InteropServices;
+public class PnpSim {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SP_DEVINFO_DATA {
+        public uint cbSize;
+        public Guid ClassGuid;
+        public uint DevInst;
+        public IntPtr Reserved;
+    }
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid ClassGuid, IntPtr hwndParent);
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool SetupDiCreateDeviceInfo(IntPtr DeviceInfoSet, string DeviceName, ref Guid ClassGuid, string DeviceDescription, IntPtr hwndParent, uint CreationFlags, ref SP_DEVINFO_DATA DeviceInfoData);
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool SetupDiSetDeviceRegistryProperty(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData, uint Property, byte[] PropertyBuffer, uint PropertyBufferSize);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    public static extern bool SetupDiCallClassInstaller(uint InstallFunction, IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    public static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
+
+    public static string RegisterUsbDevice() {
+        Guid usbClass = new Guid("36fc9e60-c465-11cf-8056-444553540000");
+        IntPtr set = SetupDiCreateDeviceInfoList(ref usbClass, IntPtr.Zero);
+        if (set == new IntPtr(-1)) return "Failed CreateList: " + Marshal.GetLastWin32Error();
+        try {
+            SP_DEVINFO_DATA data = new SP_DEVINFO_DATA();
+            data.cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
+            bool ok = SetupDiCreateDeviceInfo(set, "USB\\VID_03EB&PID_2404\\SIM03EB01", ref usbClass, "Simulated Atmel USB Device (VID_03EB)", IntPtr.Zero, 0, ref data);
+            if (!ok) return "Failed CreateDeviceInfo: " + Marshal.GetLastWin32Error();
+            string hwId = "USB\\VID_03EB&PID_2404\0\0";
+            byte[] bytes = System.Text.Encoding.Unicode.GetBytes(hwId);
+            SetupDiSetDeviceRegistryProperty(set, ref data, 1, bytes, (uint)bytes.Length);
+            bool reg = SetupDiCallClassInstaller(0x19, set, ref data);
+            return "Registered: " + reg + " (Err=" + Marshal.GetLastWin32Error() + ")";
+        } finally {
+            SetupDiDestroyDeviceInfoList(set);
+        }
+    }
+}
+'@
+Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
+[PnpSim]::RegisterUsbDevice()
+Get-PnpDevice | Where-Object { $_.InstanceId -like '*VID_03EB*' } | Format-List FriendlyName, InstanceId, Class, Status
+```
+
+##### Section-by-Section Explanation of the PowerShell `SetupAPI` Command
+
+1. **Section 1 — Defining the Windows PnP Data Structure (`SP_DEVINFO_DATA`)**:
+   - `SP_DEVINFO_DATA` is the native C struct that Windows Device Manager (`setupapi.dll`) uses to track a hardware device instance in memory.
+   - `ClassGuid` is the device category GUID, and `DevInst` is the internal handle to the device node (`devnode`) in the Windows Plug-and-Play tree.
+2. **Section 2 — Importing Native Windows `setupapi.dll` Functions (`[DllImport]`)**:
+   - PowerShell does not have a built-in `New-PnpDevice` cmdlet. Using P/Invoke (`[DllImport("setupapi.dll")]`), C# imports five official Win32 SetupAPI functions:
+     - `SetupDiCreateDeviceInfoList`: Creates an empty in-memory container ("Device Information Set") to stage a new device.
+     - `SetupDiCreateDeviceInfo`: Creates a new uninitialized device node (`devnode`) inside that container with a specific Device Instance ID (`USB\VID_03EB...`) and friendly description.
+     - `SetupDiSetDeviceRegistryProperty`: Writes hardware properties (such as the Hardware ID string) into the device's registry key under `HKLM\SYSTEM\CurrentControlSet\Enum\USB\...`.
+     - `SetupDiCallClassInstaller`: Tells the Windows Plug-and-Play manager to formally register/install the device node into the OS.
+     - `SetupDiDestroyDeviceInfoList`: Frees the unmanaged memory handle when finished (`finally` block).
+3. **Section 3 — Creating the USB Device Container (`RegisterUsbDevice`)**:
+   - `36fc9e60-c465-11cf-8056-444553540000` is Microsoft's official system-wide `GUID_DEVCLASS_USB` (Universal Serial Bus controllers / devices).
+   - `SetupDiCreateDeviceInfoList` initializes a staging list specifically for the `USB` device class.
+4. **Section 4 — Stamping the `USB\VID_03EB` Identity & Registering with PnP Manager**:
+   - `SetupDiCreateDeviceInfo` creates the device instance at `USB\VID_03EB&PID_2404\SIM03EB01` (`VID_03EB` = Atmel Corp., `PID_2404` = USB composite device, `SIM03EB01` = serial/instance ID) with description `"Simulated Atmel USB Device (VID_03EB)"`.
+   - `SetupDiSetDeviceRegistryProperty(..., 1, ...)` writes the `REG_MULTI_SZ` (double-null-terminated Unicode `\0\0`) Hardware ID property (`1` = `SPDRP_HARDWAREID`).
+   - `SetupDiCallClassInstaller(0x19, ...)` invokes `0x19` (`DIF_REGISTERDEVICE`), which commits the new phantom USB device to the live Windows PnP tree and creates `HKLM\SYSTEM\CurrentControlSet\Enum\USB\VID_03EB&PID_2404\SIM03EB01`.
+5. **Section 5 — Compiling and Verifying in PowerShell (`Add-Type` & `Get-PnpDevice`)**:
+   - `Add-Type -TypeDefinition $code` compiles the C# class in memory, `[PnpSim]::RegisterUsbDevice()` executes the Win32 registration, and `Get-PnpDevice` queries WMI/CIM (`Win32_PnPEntity`) to confirm Windows Device Manager now lists `USB\VID_03EB&PID_2404\SIM03EB01`.
+
+> **Important MDE Kernel Sensor Caveat (`MsSense.exe` vs. `SetupAPI`)**:
+> While the `SetupAPI` script above registers a real PnP device node in Windows Device Manager and `HKLM\SYSTEM\CurrentControlSet\Enum\USB`, Microsoft Defender for Endpoint's kernel sensor (`MsSense.exe` / `WdFilter.sys`) only emits a `DeviceEvents` (`ActionType == "PnpDeviceConnected"`) telemetry record when the **physical USB bus driver (`usbhub.sys` / `usbccgp.sys`)** completes a hardware enumeration IRP (`IRP_MN_QUERY_DEVICE_RELATIONS` / `IRP_MN_START_DEVICE`). Because a software-registered `SetupAPI` devnode has no physical USB bus PDO underneath it on an Azure VM, MDE will not emit `PnpDeviceConnected` from software registration alone—use **Method 1** (or **Method 3** below) to guarantee the Sentinel Incident and Logic App trigger on virtual machines.
+
+---
+
+#### Method 3: Automated End-to-End PowerShell Script ([Simulate-UsbTestEvent.ps1](./Simulate-UsbTestEvent.ps1))
+
+To run both the guest VM PnP registration and the Sentinel Analytics Rule test automatically from Azure Cloud Shell or PowerShell 7 (and automatically restore the clean production KQL query afterward):
 
 ```powershell
 # Trigger a simulated USB\VID_03EB event against an onboarded MDE VM, verify full isolation,

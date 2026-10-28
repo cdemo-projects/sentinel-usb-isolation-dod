@@ -91,7 +91,7 @@ Under **Alert enrichment > Custom details**, add these exact keys:
 
 Do not add a custom alert-title override. Save the rule. If the wizard creates it enabled, disable it immediately before connecting automation. Do not enable incident grouping later: this workflow intentionally processes only one matching alert/device per incident.
 
-> **Zero-Lookup Setup:** You do **not** need to look up or copy your Workspace Resource ID, Analytics Rule ID, or Rule Name! The playbook automatically validates the Sentinel incident path and verifies the alert's `DetectionSignature = "USB-VID-03EB-v1"` and 40-character `MDEDeviceId` from Custom Details.
+> **Flexible Scope Parameters (`workspaceResourceId` & `ruleResourceId`):** At the top of [portal-code-view.json](./portal-code-view.json) (lines 12 and 16), you can paste either the **plain GUID** (e.g., your Workspace ID GUID and Analytics Rule ID GUID) **or** the **full ARM Resource ID path** (`/subscriptions/.../workspaces/...`), or leave them blank (`""`) to allow any Sentinel incident in the workspace carrying `DetectionSignature = "USB-VID-03EB-v1"` and a 40-character `MDEDeviceId`.
 
 ---
 
@@ -268,10 +268,41 @@ are separate from Sentinel workspace permissions.
 | Action | Run playbook -> select your Logic App (`isolate-usb-03eb-dod`) |
 | Enabled | On, once ready for pilot/production |
 
-3. **Run an End-to-End Pilot or Simulated Test**:
-   - Either connect an approved test USB device matching `USB\VID_03EB` on a non-critical test machine, **or** run [Simulate-UsbTestEvent.ps1](./Simulate-UsbTestEvent.ps1) to inject a synthetic `PnpDeviceConnected` test row, verify that the Sentinel Incident is created, the Logic App run succeeds, MDE Action Center reports `Isolate (Full) - Succeeded`, and the incident comment is written.
+3. **Run an End-to-End Pilot or Simulated Test (3 Options)**:
+   - **Option A — Zero-CLI Portal KQL Simulation (Recommended for Virtual Machines)**:
+     1. In **Microsoft Sentinel > Logs**, find a non-critical test machine's 40-character `DeviceId` and `DeviceName`:
+        ```kusto
+        DeviceInfo
+        | where TimeGenerated > ago(24h) and isnotempty(DeviceId)
+        | summarize arg_max(TimeGenerated, DeviceName, OSPlatform) by DeviceId
+        | take 10
+        ```
+     2. Temporarily edit your Analytics Rule query and prepend this `SimulatedUsbEvent` block at the very top (replacing `<40-CHAR-MDE-DEVICE-ID>` and `<TEST-VM-HOSTNAME>`):
+        ```kusto
+        let SimulatedUsbEvent = print
+            TimeGenerated = now(),
+            DeviceId = "<40-CHAR-MDE-DEVICE-ID>",
+            DeviceName = "<TEST-VM-HOSTNAME>",
+            ActionType = "PnpDeviceConnected",
+            AdditionalFields = todynamic('{"ClassId":"{36fc9e60-c465-11cf-8056-444553540000}","ClassName":"USB","DeviceDescription":"Simulated Atmel USB Composite Device (VID_03EB Test)","DeviceId":"USB\\\\VID_03EB&PID_2404\\\\SIM03EB01"}');
+        union DeviceEvents, SimulatedUsbEvent
+        | where ActionType == "PnpDeviceConnected"
+        | extend AdditionalFields = todynamic(AdditionalFields)
+        | extend AdditionalFields_ClassId = tostring(AdditionalFields["ClassId"]),
+                 AdditionalFields_ClassName = tostring(AdditionalFields["ClassName"]),
+                 AdditionalFields_DeviceDescription = tostring(AdditionalFields["DeviceDescription"]),
+                 AdditionalFields_DeviceId = tostring(AdditionalFields["DeviceId"])
+        | where AdditionalFields_DeviceId startswith "USB\\VID_03EB"
+        | project TimeGenerated, DeviceId, DeviceName, ActionType, AdditionalFields_ClassId, AdditionalFields_ClassName, AdditionalFields_DeviceDescription, AdditionalFields_DeviceId
+        | extend MDEDeviceId = DeviceId, USBDeviceId = tostring(AdditionalFields_DeviceId), DetectionSignature = "USB-VID-03EB-v1"
+        ```
+     3. Wait up to 5 minutes for the rule to fire, confirm the Sentinel Incident is created, the Logic App run succeeds, MDE Action Center reports `Isolate (Full) - Succeeded`, and the incident comment is written.
+     4. Remove the `let SimulatedUsbEvent ...;` block, change `union DeviceEvents, SimulatedUsbEvent` back to `DeviceEvents`, save the rule, and release the test VM from isolation in MDE.
+   - **Option B — Windows Guest VM PowerShell `SetupAPI` Simulation (`setupapi.dll`)**:
+     - On a test Windows VM (elevated PowerShell), you can register a software `USB\VID_03EB&PID_2404\SIM03EB01` PnP device node in Windows Device Manager (`HKLM\SYSTEM\CurrentControlSet\Enum\USB\VID_03EB&PID_2404\SIM03EB01`). See [README.md — Method 2](./README.md#method-2-windows-guest-vm-powershell-setupapi-simulation-setupapidll) for the full PowerShell snippet, a section-by-section explanation of each Win32 `setupapi.dll` call, and why MDE's kernel sensor (`MsSense.exe`) requires physical USB bus IRPs (or **Option A** above on Azure VMs) to emit a `DeviceEvents` row.
+   - **Option C — Physical USB Test or Automated Script ([Simulate-UsbTestEvent.ps1](./Simulate-UsbTestEvent.ps1))**:
+     - Connect an approved test USB device matching `USB\VID_03EB` on a physical test endpoint, **or** run [Simulate-UsbTestEvent.ps1](./Simulate-UsbTestEvent.ps1) (with optional `-UnisolateAfterTest`) to automate the KQL injection, verification, and cleanup.
    - Re-run the playbook on the same incident to verify duplicate-request prevention.
-   - Release the test endpoint from isolation in MDE (or pass `-UnisolateAfterTest` to `Simulate-UsbTestEvent.ps1`).
 
 **To stop automated containment at any time:** disable the Automation Rule and Analytics Rule, then inspect queued workflow runs and pending MDE actions. Disabling rules does not automatically release already-isolated endpoints.
 

@@ -151,9 +151,9 @@ class PackageTests(unittest.TestCase):
         portal = json.loads((ROOT / "portal-workflow-definition.json").read_text(encoding="utf-8"))
         expected = copy.deepcopy(DEFINITION)
         expected["parameters"]["$connections"]["defaultValue"] = {}
-        expected["parameters"]["workspaceResourceId"]["defaultValue"] = "PASTE-WORKSPACE-RESOURCE-ID"
-        expected["parameters"]["ruleResourceId"]["defaultValue"] = "PASTE-ANALYTICS-RULE-RESOURCE-ID"
-        expected["parameters"]["alertTitle"]["defaultValue"] = TEMPLATE["variables"]["alertTitle"]
+        expected["parameters"]["workspaceResourceId"]["defaultValue"] = ""
+        expected["parameters"]["ruleResourceId"]["defaultValue"] = ""
+        expected["parameters"]["alertTitle"]["defaultValue"] = ""
         expected["parameters"]["notificationSenderEmail"]["defaultValue"] = ""
         expected["parameters"]["notificationRecipientEmail"]["defaultValue"] = ""
         self.assertEqual(portal, expected)
@@ -162,7 +162,7 @@ class PackageTests(unittest.TestCase):
         guide = (ROOT / "CUSTOMER-PORTAL-SETUP.md").read_text(encoding="utf-8")
         query = re.search(r"```kusto\n(.*?)\n```", guide, re.DOTALL).group(1)
         self.assertEqual(query, TEMPLATE["variables"]["query"])
-        self.assertIn("Replace **only the value of `definition`**", guide)
+        self.assertIn("portal-code-view.json", guide)
 
     def test_parameter_contract_and_activation(self):
         params = json.loads((ROOT / "azuredeploy.parameters.json").read_text())
