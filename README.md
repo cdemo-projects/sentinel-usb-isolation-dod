@@ -70,7 +70,7 @@ If the customer is willing to deploy the ARM template through the Azure Portal U
      - **Enable Detection And Automation**: leave `false` for initial testing, or set `true` if ready to go live.
    - Click **Review + create** -> **Create**.
    - Once complete, open the deployment's **Outputs** tab and copy `managedIdentityPrincipalId`.
-2. **Grant Permissions (Cloud Shell PowerShell)**:
+2. **Grant Permissions (Cloud Shell PowerShell — or see [Option 3A in CUSTOMER-PORTAL-SETUP.md](./CUSTOMER-PORTAL-SETUP.md#option-3a-dod-il5-zero-cli-login-method-temporary-bootstrap-app-registration--invoke-restmethod) if CLI/Cloud Shell user login is blocked by `AADSTS53003`)**:
    - Open Azure Cloud Shell (PowerShell) as a user with active `Privileged Role Administrator` / `Global Administrator` + Resource Group `Owner`/`RBAC Administrator` and paste:
    ```powershell
    $subId       = "<SUBSCRIPTION-ID>"

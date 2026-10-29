@@ -135,9 +135,114 @@ Do not add a custom alert-title override. Save the rule. If the wizard creates i
 
 ### Phase 3. Grant Azure RBAC & MDE Permissions (One-Time Admin Step)
 
-You can grant all required permissions in **one shot** using Azure Cloud Shell (recommended, no extra modules or `Connect-MgGraph` consent prompts required), or via the Portal IAM UI + `Microsoft.Graph`.
+You can grant all required permissions using any of three methods depending on your environment's sign-in policies:
+- **Option 3A (Recommended for DoD IL5 when CLI Sign-in / Cloud Shell is Blocked — `AADSTS53003`)**: Temporary Bootstrap App Registration + `Invoke-RestMethod` (Zero CLI user login, zero PowerShell modules required).
+- **Option 3B**: One-Shot Azure Cloud Shell Commands (`az cli` + `az rest`).
+- **Option 3C**: Portal IAM UI + `Microsoft.Graph` PowerShell SDK.
 
-#### Option 3A: One-Shot Cloud Shell Commands (`az cli` + `az rest` — Fastest)
+#### Option 3A: DoD IL5 Zero-CLI-Login Method (Temporary Bootstrap App Registration + `Invoke-RestMethod`)
+
+In many DoD IL5 environments, Azure Cloud Shell is disabled and interactive/device-code PowerShell user sign-ins (`az login` or `Connect-MgGraph`) are blocked by Entra ID Conditional Access (**Error `AADSTS53003`**). Additionally, the Azure Portal GUI (`Enterprise applications > Permissions`) is **read-only** for System-Assigned Managed Identities—Microsoft does not provide an *"Add a permission"* button in the portal UI for Managed Identities.
+
+##### How Does an App Registration Grant Permissions to the Managed Identity?
+
+1. **Why the Portal GUI Can't Do It Directly**: Both an **App Registration** and a **System-Assigned Managed Identity** have an underlying **Service Principal (Enterprise Application)** in Entra ID. However, the Azure Portal GUI only shows the **API permissions > + Add a permission** button on **App Registrations**—not on Managed Identities.
+2. **How the Bootstrap Hand-Off Works**:
+   - You create a **temporary App Registration** in the Portal GUI and grant **it** two Microsoft Graph permissions in the GUI: `AppRoleAssignment.ReadWrite.All` (permission to assign app roles to any service principal in the tenant) and `Application.Read.All` (permission to look up `WindowsDefenderATP`'s role IDs).
+   - Because an App Registration authenticates to `https://login.microsoftonline.us/<TENANT_ID>/oauth2/v2.0/token` using **`grant_type=client_credentials`** (workload/service authentication rather than interactive user login), it completely bypasses user Conditional Access blocks (`AADSTS53003`) on CLI/device-code sign-ins.
+   - The PowerShell script uses that App Registration's token to call `POST https://dod-graph.microsoft.us/v1.0/servicePrincipals/{ManagedIdentityObjectId}/appRoleAssignments`, which writes `Machine.Isolate` and `Machine.ReadWrite.All` (from `WindowsDefenderATP`) **directly onto the Logic App's System-Assigned Managed Identity** in Entra ID.
+   - **Zero Standing Secrets**: Once the script prints `[+] SUCCESS`, those permissions are permanently attached to the **Logic App's Managed Identity** itself. You then **delete the temporary App Registration** in Step 6—leaving zero client secrets in the environment while the Logic App runs 100% on its System-Assigned Managed Identity.
+
+```text
+[Temporary Bootstrap App Reg] ──(1. OAuth2 client_credentials)──> [login.microsoftonline.us]
+        │                                                                   │
+        │ <───────────────(2. Bearer Token for dod-graph.microsoft.us)──────┘
+        │
+        └──(3. POST /v1.0/servicePrincipals/{MI_Object_ID}/appRoleAssignments)──> [Logic App Managed Identity]
+                                                                                   ├── Machine.Isolate (WindowsDefenderATP)
+   (4. Delete Temporary App Reg — Logic App keeps permissions permanently!)        └── Machine.ReadWrite.All (WindowsDefenderATP)
+```
+
+##### Step-by-Step Walkthrough (DoD IL5 / `portal.azure.us`)
+
+1. **Step 1 — Assign Azure RBAC in the Portal GUI**:
+   - On your Sentinel **Resource Group** -> **Access control (IAM) > Add role assignment**:
+     - Assign **`Microsoft Sentinel Responder`** to **Managed identity** -> select your **Logic App**.
+     - Assign **`Microsoft Sentinel Automation Contributor`** to **User, group, or service principal** -> search for and select **`Azure Security Insights`** *(also assign this directly on the Logic App's own **Access control (IAM)** blade if your DoD landing zone restricts RG-level inheritance)*.
+2. **Step 2 — Create the Temporary Bootstrap App Registration in Entra ID**:
+   - Go to **Microsoft Entra ID > Manage > App registrations > + New registration**.
+   - **Name**: `Temp-MI-Permission-Grant` -> click **Register**.
+   - Copy the **Application (client) ID** and **Directory (tenant) ID** from the **Overview** page.
+3. **Step 3 — Grant `Microsoft Graph` Permissions to the Temporary App in the GUI**:
+   - Inside `Temp-MI-Permission-Grant`, go to **Manage > API permissions > + Add a permission**.
+   - Click **Microsoft Graph** -> **Application permissions**.
+   - Search for and check both:
+     - **`AppRoleAssignment.ReadWrite.All`**
+     - **`Application.Read.All`**
+   - Click **Add permissions**, then click **Grant admin consent for [Tenant]** -> **Yes** (verify both show a green checkmark).
+4. **Step 4 — Create a Temporary Client Secret**:
+   - Go to **Manage > Certificates & secrets > + New client secret**.
+   - Give it a description, set expiration to the shortest option, click **Add**, and immediately copy the **`Value`** column (not `Secret ID`).
+5. **Step 5 — Run the Built-In PowerShell `Invoke-RestMethod` Script (No Login Prompt, No Modules Required)**:
+   - Open standard Windows PowerShell on any workstation with internet/DoD access, paste your 4 values at the top, and run:
+
+```powershell
+$tenantId     = "PASTE-DIRECTORY-TENANT-ID"
+$clientId     = "PASTE-TEMP-APP-CLIENT-ID"
+$clientSecret = "PASTE-TEMP-APP-SECRET-VALUE"
+$miObjectId   = "PASTE-LOGIC-APP-MANAGED-IDENTITY-OBJECT-ID" # From Logic App -> Identity -> System assigned -> Object (principal) ID
+
+$loginEndpoint = "https://login.microsoftonline.us" # Use https://login.microsoftonline.com for GCC / Commercial
+$graphUrl      = "https://dod-graph.microsoft.us"   # Use https://graph.microsoft.us (GCC High) or https://graph.microsoft.com (GCC/Commercial)
+
+# 1. Acquire a Graph token silently using the App Registration (no user login / bypasses AADSTS53003)
+$tokenResponse = Invoke-RestMethod -Method POST -Uri "$loginEndpoint/$tenantId/oauth2/v2.0/token" -Body @{
+    client_id     = $clientId
+    client_secret = $clientSecret
+    scope         = "$graphUrl/.default"
+    grant_type    = "client_credentials"
+}
+$headers = @{
+    Authorization  = "Bearer $($tokenResponse.access_token)"
+    "Content-Type" = "application/json"
+}
+
+# 2. Look up WindowsDefenderATP Service Principal in the tenant
+$mdeSp = (Invoke-RestMethod -Method GET -Uri "$graphUrl/v1.0/servicePrincipals?`$filter=appId eq 'fc780465-2017-40d4-a0c5-307022471b92'" -Headers $headers).value[0]
+if (-not $mdeSp) { throw "WindowsDefenderATP service principal not found in tenant." }
+
+# 3. Assign Machine.Isolate and Machine.ReadWrite.All directly to the Logic App's Managed Identity
+$existing = (Invoke-RestMethod -Method GET -Uri "$graphUrl/v1.0/servicePrincipals/$miObjectId/appRoleAssignments" -Headers $headers).value
+foreach ($perm in @("Machine.Isolate", "Machine.ReadWrite.All")) {
+    $role = $mdeSp.appRoles | Where-Object { $_.value -eq $perm -and $_.isEnabled }
+    if (-not $role) { throw "AppRole '$perm' not found on WindowsDefenderATP." }
+    if ($existing | Where-Object { $_.resourceId -eq $mdeSp.id -and $_.appRoleId -eq $role.id }) {
+        Write-Host "[=] Already assigned '$perm' to Logic App Managed Identity ($miObjectId)" -ForegroundColor Yellow
+    } else {
+        $body = @{
+            principalId = $miObjectId
+            resourceId  = $mdeSp.id
+            appRoleId   = $role.id
+        } | ConvertTo-Json
+        Invoke-RestMethod -Method POST -Uri "$graphUrl/v1.0/servicePrincipals/$miObjectId/appRoleAssignments" -Headers $headers -Body $body | Out-Null
+        Write-Host "[+] SUCCESS: Assigned '$perm' to Logic App Managed Identity ($miObjectId)" -ForegroundColor Green
+    }
+}
+
+# 4. (Optional - uncomment if using built-in Managed Identity Graph Email) Grant Microsoft Graph Mail.Send
+# $graphSp = (Invoke-RestMethod -Method GET -Uri "$graphUrl/v1.0/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'" -Headers $headers).value[0]
+# $mailRole = $graphSp.appRoles | Where-Object { $_.value -eq 'Mail.Send' -and $_.isEnabled }
+# $mailBody = @{ principalId = $miObjectId; resourceId = $graphSp.id; appRoleId = $mailRole.id } | ConvertTo-Json
+# Invoke-RestMethod -Method POST -Uri "$graphUrl/v1.0/servicePrincipals/$miObjectId/appRoleAssignments" -Headers $headers -Body $mailBody | Out-Null
+```
+
+6. **Step 6 — Verify & Delete the Temporary App Registration**:
+   - In the Azure Portal, go to **Microsoft Entra ID > Enterprise applications**, change **Application type == Managed Identities**, click your Logic App -> **Security > Permissions**, and confirm **`Machine.Isolate`** and **`Machine.ReadWrite.All`** appear under **Admin consent**.
+   - Go back to **Microsoft Entra ID > App registrations**, click **`Temp-MI-Permission-Grant`**, and click **Delete**. Your Logic App Managed Identity keeps its permissions permanently!
+
+---
+
+#### Option 3B: One-Shot Cloud Shell Commands (`az cli` + `az rest` — When Cloud Shell Is Allowed)
 
 Run this in Azure Cloud Shell (PowerShell) as an active **Global Administrator** or **Privileged Role Administrator** who also has **Owner** / **RBAC Administrator** on the Resource Group:
 
@@ -199,7 +304,7 @@ In DoD IL5 environments, security teams often require restricting application-le
 
 > **Fault-Tolerant Email Design**: If MDE Full Isolation succeeds (`Record_success`) but the email notification fails (for example, `Mail.Send` has not been granted yet in PIM or the sender UPN has no Exchange mailbox), the playbook catches the email error in `Record_email_warning`, posts a warning comment to the Sentinel incident, and still completes the Logic App run as `Succeeded` so MDE containment is never falsely reported as failed.
 
-#### Option 3B: Portal IAM UI + `Microsoft.Graph` PowerShell
+#### Option 3C: Portal IAM UI + `Microsoft.Graph` PowerShell
 
 If you prefer assigning Azure RBAC in the Portal and using `Microsoft.Graph` on a workstation:
 
