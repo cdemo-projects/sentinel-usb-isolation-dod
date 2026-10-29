@@ -126,7 +126,14 @@ Do not add a custom alert-title override. Save the rule. If the wizard creates i
        }
      ```
    - **Step B**: Select everything (`Ctrl+A`) in **Code view** and replace it by pasting the entire contents of [portal-code-view.json](./portal-code-view.json).
-   - **Step C**: Scroll to the very bottom of **Code view**, replace the placeholder `"parameters": { "$connections": { ... } }` block with the block you copied in **Step A**, and click **Save**!
+   - **Step C**: Scroll to the very bottom of **Code view**, replace the placeholder `"parameters": { "$connections": { ... } }` block with the block you copied in **Step A** (if your connection key is named `"azuresentinel-1"` instead of `"azuresentinel"`, ensure the trigger's `@parameters('$connections')['...']['connectionId']` key matches it), and click **Save**!
+   - **Step D — Click `Publish` (New Portal Designer `Draft` | `Active` Bar)**:
+     - If your Azure Portal shows the **`Workflow | Code | Run history`** tabs at the top center and **`Draft | Active`** with a blue **`Publish`** button at the top right, clicking Save only updates the **`Draft`**.
+     - You **must click `Publish`** in the top-right corner so the **`Active`** version is updated—Microsoft Sentinel Automation Rules and `Incident -> Actions -> Run playbook` only read the **`Active` (published)** workflow!
+   - **⚠️ Do NOT Click `⚡ Run draft` / `Run` Inside the Logic App Blade**:
+     - Clicking **`Run draft`** or **`Run`** directly inside the Logic App screen fires the workflow with an **empty trigger payload (`{}`)** and no Sentinel incident attached.
+     - Because `triggerBody()['object']['id']` is empty, `Validate incident scope` will evaluate to `False` and fail at **`Reject wrong workspace` (`InvalidIncidentScope: Trigger must reference an incident in the configured workspace`)**.
+     - Always trigger the playbook from an actual incident inside **Microsoft Sentinel -> Incidents -> Select Incident -> Actions -> Run playbook**.
    - *(Optional Email Alerts)*:
      - **Office 365 Outlook Connector in Designer (Easiest — No Graph Permissions Needed)**: After clicking **Save** in Code view, switch to **Logic app designer**, click inside `Process_incident`, and add **Office 365 Outlook -> Send an email (V2)** right after `Record_success`.
      - **Managed Identity Graph `sendMail` (No User Sign-in)**: At the top of **Code view**, set `notificationSenderEmail`'s `defaultValue` to your sender mailbox UPN (e.g., `"soc-alerts@agency.mil"`) and `notificationRecipientEmail`'s `defaultValue` to your recipient address (e.g., `"soc@agency.mil"`).
