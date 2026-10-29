@@ -28,7 +28,7 @@
     }
   },
   "triggers": {
-    "Sentinel_incident": {
+    "Microsoft_Sentinel_incident": {
       "type": "ApiConnectionWebhook",
       "inputs": {
         "host": {
@@ -37,7 +37,7 @@
           }
         },
         "body": {
-          "callback_url": "@listCallbackUrl()"
+          "callback_url": "@{listCallbackUrl()}"
         },
         "path": "/incident-creation"
       },

@@ -69,11 +69,11 @@
             "notificationRecipientEmail": { "type": "String" }
           },
           "triggers": {
-            "Sentinel_incident": {
+            "Microsoft_Sentinel_incident": {
               "type": "ApiConnectionWebhook",
               "inputs": {
                 "host": { "connection": { "name": "@parameters('$connections')['azuresentinel']['connectionId']" } },
-                "body": { "callback_url": "@listCallbackUrl()" },
+                "body": { "callback_url": "@{listCallbackUrl()}" },
                 "path": "/incident-creation"
               },
               "runtimeConfiguration": { "concurrency": { "runs": 1 } }

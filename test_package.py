@@ -196,7 +196,8 @@ class PackageTests(unittest.TestCase):
         for text in strings(DEFINITION):
             if text.startswith("@"):
                 with self.subTest(expression=text):
-                    Expression(text[1:])
+                    expr = text[2:-1] if text.startswith("@{") and text.endswith("}") else text[1:]
+                    Expression(expr)
                     for name in re.findall(r"(?:body|outputs)\('([^']+)'\)", text):
                         self.assertIn(name, ACTIONS)
 
@@ -292,7 +293,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(request["retryPolicy"], {"type": "none"})
         self.assertIn("outputs('Device_id')", request["uri"])
         self.assertNotIn("/unisolate", "\n".join(strings(DEFINITION)))
-        self.assertEqual(DEFINITION["triggers"]["Sentinel_incident"]["runtimeConfiguration"]["concurrency"]["runs"], 1)
+        self.assertEqual(DEFINITION["triggers"]["Microsoft_Sentinel_incident"]["runtimeConfiguration"]["concurrency"]["runs"], 1)
 
     def test_success_is_actual_full_isolation_on_expected_endpoint(self):
         expression = ACTIONS["Verify_completion"]["expression"]
